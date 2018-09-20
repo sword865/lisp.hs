@@ -1,7 +1,9 @@
 module Evaluator (eval, primitiveBindings) where
 
 import LispVal
-import Control.Monad.Trans.Error
+import Control.Monad
+import Control.Monad.Except
+import Control.Monad.IO.Class (liftIO)
 
 eval :: Env -> LispVal -> IOThrowsError LispVal
 eval env (Atom id) = getVar env id
