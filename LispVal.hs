@@ -1,78 +1,82 @@
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DeriveDataTypeable #-}
+
 module LispVal where
 
 import Text.ParserCombinators.Parsec (ParseError)
 import Control.Exception
 import Control.Monad.Trans.Except
 import Data.IORef
+import Data.Typeable
 import Control.Monad (liftM)
 import Control.Monad.IO.Class (liftIO)
 import Data.Maybe (isJust)
+import Data.Text as T
 
-data LispVal = Atom String
+data LispVal = Atom T.Text
              | List [LispVal]
              | DottedList [LispVal] LispVal
-             | String String
+             | String T.Text
              | Bool Bool
              | Character Char
              | Number Integer
              | PrimitiveFunc ([LispVal] -> ThrowsError LispVal)
-             | Func { params :: [String], vararg :: Maybe String, body :: [LispVal], closure :: Env }
+             | Func { params :: [T.Text], vararg :: Maybe T.Text, body :: [LispVal], closure :: Env }
+              deriving (Typeable)
 
-showVal :: LispVal -> String
+showVal :: LispVal -> T.Text
 showVal (Atom name) = name
-showVal (List contents) = "(" ++ unwordsList contents ++ ")"
-showVal (DottedList head tail) = "(" ++ unwordsList head ++ " . "
-                                 ++ showVal tail ++ ")"
-showVal (String contents) = "\"" ++ contents ++ "\""
+showVal (List contents) = T.concat["(", unwordsList contents, ")"]
+showVal (DottedList head tail) = T.concat ["(",  unwordsList head, " . ", showVal tail, ")"]
+showVal (String contents) = T.concat ["\"", contents, "\""]
 showVal (Bool True) = "#t"
 showVal (Bool False) = "#f"
-showVal (Character c) = [c]
-showVal (Number number) = show number
+showVal (Character c) =  T.pack [c]
+showVal (Number number) = T.pack $ show number
 showVal (PrimitiveFunc _) = "<primitive>"
 showVal Func {params = args, vararg = varargs, body = body, closure = env} =
-    "(lambda (" ++ unwords (map show args) ++
-        (case varargs of
+    T.concat ["(lambda (", T.unwords args,
+        case varargs of
             Nothing -> ""
-            Just arg -> " . " ++ arg) ++ ") ...)"
+            Just arg -> T.concat [" . ", arg], ") ...)"]
 
 
-unwordsList :: [LispVal] -> String
-unwordsList = unwords . map showVal
+unwordsList :: [LispVal] -> T.Text
+unwordsList content =  T.unwords $ showVal <$> content
 
-instance Show LispVal where show = showVal
+instance Show LispVal where show = T.unpack . showVal
 
 instance Exception LispException
 
 data LispException = NumArgs Integer [LispVal]
-                   | TypeMismatch String LispVal
+                   | TypeMismatch T.Text LispVal
                    | Parser ParseError
-                   | BadSpecialForm String LispVal
-                   | NotFunction String String
-                   | UnboundVar String String
-                   | Default String
+                   | BadSpecialForm T.Text LispVal
+                   | NotFunction T.Text T.Text
+                   | UnboundVar T.Text T.Text
+                   | Default T.Text
 
-showError :: LispException -> String
-showError (NumArgs expected found)      = "Expected " ++ show expected
-                                       ++ " args; found values "
-                                       ++ unwordsList found
-showError (TypeMismatch expected found) = "Invalid type: expected " ++ expected
-                                       ++ ", found " ++ show found
-showError (Parser parseErr)           = "Parse error at " ++ show parseErr
-showError (BadSpecialForm message form) = message ++ ": " ++ show form
-showError (NotFunction message func)    = message ++ ": " ++ show func
-showError (UnboundVar message varname)  = message ++ ": " ++ varname
+showError :: LispException -> T.Text
+showError (NumArgs expected found)      = T.concat ["Expected ", T.pack $ show expected,
+                                      " args; found values ", unwordsList found]
+showError (TypeMismatch expected found) = T.concat ["Invalid type: expected ", expected,
+                                      ", found ", showVal found]
+showError (Parser parseErr)           = T.concat ["Parse error at ", T.pack $ show parseErr]
+showError (BadSpecialForm message form) = T.concat [message, ": ", showVal form]
+showError (NotFunction message func)    = T.concat [message, ": ", func]
+showError (UnboundVar message varname)  = T.concat [message, ": ", varname]
 showError (Default message)             = message
 
-instance Show LispException where show = showError
+instance Show LispException where show = T.unpack . showError
 
 type ThrowsError = Either LispException
 
-trapError action = catchE action (return . show)
+trapError action = catchE action (return . showError)
 
 extractValue :: ThrowsError a -> a
 extractValue (Right val) = val
 
-type Env = IORef [(String, IORef LispVal)]
+type Env = IORef [(T.Text, IORef LispVal)]
 
 nullEnv :: IO Env
 nullEnv = newIORef []
@@ -83,20 +87,20 @@ liftThrows :: ThrowsError a -> IOThrowsError a
 liftThrows (Left err) = throwE err
 liftThrows (Right val) = return val
 
-runIOThrows :: IOThrowsError String -> IO String
+runIOThrows :: IOThrowsError T.Text -> IO T.Text
 runIOThrows action = fmap extractValue (runExceptT (trapError action))
 
-isBound :: Env -> String -> IO Bool
+isBound :: Env -> T.Text -> IO Bool
 isBound envRef var =  fmap (isJust . lookup var) (readIORef envRef)
 
-getVar :: Env -> String -> IOThrowsError LispVal
+getVar :: Env -> T.Text -> IOThrowsError LispVal
 getVar envRef var = do
     env <- liftIO $ readIORef envRef
     maybe (throwE $ UnboundVar "Getting an unbound variable" var)
           (liftIO . readIORef)
           (lookup var env)
 
-setVar :: Env -> String -> LispVal -> IOThrowsError LispVal
+setVar :: Env -> T.Text -> LispVal -> IOThrowsError LispVal
 setVar envRef var value = do
     env <- liftIO $ readIORef envRef
     maybe (throwE $ UnboundVar "Setting an unbound variable" var)
@@ -104,7 +108,7 @@ setVar envRef var value = do
           (lookup var env)
     return value
 
-defineVar :: Env -> String -> LispVal -> IOThrowsError LispVal
+defineVar :: Env -> T.Text -> LispVal -> IOThrowsError LispVal
 defineVar envRef var value = do
         alreadyDefined <- liftIO $ isBound envRef var
         if alreadyDefined
@@ -115,7 +119,7 @@ defineVar envRef var value = do
                writeIORef envRef ((var, valueRef) : env)
                return value
 
-bindVars :: Env -> [(String, LispVal)] -> IO Env
+bindVars :: Env -> [(T.Text, LispVal)] -> IO Env
 bindVars envRef bindings = readIORef envRef >>= extendEnv bindings >>= newIORef
     where extendEnv bindings env = fmap (++ env) (mapM addBinding bindings)
           addBinding (var, value) = do
